@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>GPX Point Editor</title>
+
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.6.0/dist/leaflet.css" integrity="sha512-xwE/Az9zrjBIphAcBb3F6JVqxf46+CDLwfLMHloNu6KEQCAWi6HcDUbeOfBIptF7tcCzusKFjFw2yuvEpDL9wQ==" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.6.0/dist/leaflet.js" integrity="sha512-gZwIG9x3wUXg2hdXF6+rVkLF/0Vi9U8D2Ntg4Ga5I5BZpVkVxlJWbSQtXPSiUTtC0TjtGOmxa1AJPuV0CPthew==" crossorigin=""></script>
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/moment.js/2.18.1/moment.min.js"></script>
+    <script src="https://www.chartjs.org/dist/2.9.3/Chart.min.js"></script>
+    <script src="https://www.chartjs.org/samples/latest/utils.js"></script>
+	<style>
+		canvas {
+			-moz-user-select: none;
+			-webkit-user-select: none;
+			-ms-user-select: none;
+		}
+	</style>
+<style>
+.my-div-icon {
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid #666;
+}
+.marker-div-icon {
+  border-radius: 10px;
+  background: #f00;
+  border: 1px solid #600;
+}
+</style>
+</head>
+<body>
+<h2>GPX Point Editor</h2>
+Remove erroneous points from the GPX by clicking them.
+<table style="width:100%;"><tr><td style="width:60%;"><div id="mapid" style="width: 100%; height: 800px; display:inline-block;"></div></td>
+<td style="width:40%;"><canvas id="chart1"></canvas>
+<textarea id="xml"></textarea><input type="submit" value="Load XML" id="loadxml"/><input type="submit" value="Generate XML" id="genxml"/><br>
+Trim points so max pace/mile is:<input type="text" value="7:00" id="maxspeed"/><input type="submit" value="Trim" id="trimspeed"/><br>
+Trim points so min pace/mile is:<input type="text" value="15:00" id="minspeed"/><input type="submit" value="Trim" id="trimminspeed"/>
+</td></tr></table>
+<script>
+	var mymap = L.map('mapid').setView([51.505, -0.09], 13);
+
+	var tileLayer = L.tileLayer('https://api.mapbox.com/styles/v1/{id}/tiles/{z}/{x}/{y}?access_token=pk.eyJ1IjoibWFwYm94IiwiYSI6ImNpejY4NXVycTA2emYycXBndHRqcmZ3N3gifQ.rJcFIG214AriISLbB6B5aw', {
+    maxNativeZoom:19,
+    maxZoom:25,
+		attribution: 'Map data &copy; <a href="https://www.openstreetmap.org/">OpenStreetMap</a> contributors, ' +
+			'<a href="https://creativecommons.org/licenses/by-sa/2.0/">CC-BY-SA</a>, ' +
+			'Imagery © <a href="https://www.mapbox.com/">Mapbox</a>',
+		id: 'mapbox/streets-v11',
+		tileSize: 512,
+		zoomOffset: -1
+	}).addTo(mymap);
+
+  var onPaceTooltip = () => {};
+
+  var calculateSpeed = (t1, lat1, lon1, t2, lat2, lon2) => {
+    // From Caspar Kleijne's answer starts
+    /** Converts numeric degrees to radians */
+    if (typeof(Number.prototype.toRad) === "undefined") {
+      Number.prototype.toRad = function() {
+        return this * Math.PI / 180;
+      }
+    }
+    // From Caspar Kleijne's answer ends
+    // From cletus' answer starts
+    var R = 6371; // km
+    var dLat = (lat2-lat1).toRad();
+    var dLon = (lon2-lon1).toRad();
+    var lat1 = lat1.toRad();
+    var lat2 = lat2.toRad();
+
+    var a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+      Math.sin(dLon/2) * Math.sin(dLon/2) * Math.cos(lat1) *    Math.cos(lat2); 
+    var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); 
+    var distance = R * c;
+    // From cletus' answer ends
+
+    return (distance / (t2 - t1)) * 3600;
+  };
+
+  var loadGpxXML = (response) => {
+    mymap.eachLayer((layer) => {if (layer != tileLayer) layer.remove();});
+    // create a red polyline from an array of LatLng points
+    var latlngs = [];
+    var times = [];
+    console.log(response);
+    $(response).find("trk > trkseg > trkpt").each(function() {
+      //console.log(this);
+      latlngs.push([parseFloat($(this).attr("lat")), parseFloat($(this).attr("lon"))]);
+      var time = Date.parse($($(this).find("time")[0]).text());
+      times.push(time + 0);
+      if (latlngs.length > 100) {
+        //return false;
+      }
+    });
+
+    var polyline = L.polyline(latlngs, {color: 'red'}).addTo(mymap);
+
+    var filteredLatLngs = latlngs;
+    var paceMarker = undefined;
+    var updatePaceChart = () => {
+      filteredLatLngs = latlngs.filter((e) => e !== undefined);
+      polyline.remove();
+      polyline = L.polyline(filteredLatLngs, {color: 'red'}).addTo(mymap);
+      var chartdata = [];
+      var prev = [];
+      for (var i = 0; i < latlngs.length; i++) {
+        var latlng = latlngs[i];
+        if (latlng === undefined) {
+          continue;
+        }
+        prev.push({idx: i, v: latlng});
+        if (prev.length < 2) continue;
+        while (times[i] - times[prev[0].idx] > 60000 && prev.length > 2) {
+          prev.shift();
+        }
+        var p = prev[0];
+        var speed = calculateSpeed(times[p.idx]/1000, p.v[0], p.v[1], times[i]/1000, latlng[0], latlng[1]);
+        // = km / h.  we want sec/mile.  1/x = h/km. * sec/h * mile/km
+        speed = (1.60934 * 3600 / speed) / 60;
+        chartdata.push({t: times[i], y: speed});
+        previdx = i;
+      }
+      var dataset = chart.config.data.datasets[0];
+      //dataset.type = type;
+      dataset.data = chartdata;
+      chart.update();
+    };
+    updatePaceChart();
+    onPaceTooltip = (tooltipItem) => {
+      //console.log(tooltipItem.index);
+      if (paceMarker) {
+        paceMarker.remove();
+      }
+      var latlng = filteredLatLngs[tooltipItem.index];
+      var icon = L.divIcon({className: 'marker-div-icon'});
+      paceMarker = L.marker([latlng[0], latlng[1]], {icon: icon, zIndexOffset: 10});
+      paceMarker.addTo(mymap);
+    };
+
+    var icon = L.divIcon({className: 'my-div-icon'});
+    iconLayer = L.layerGroup();
+    var icons = [];
+    for (const [i, latlng] of latlngs.entries()) {(() => {
+      var marker = L.marker([latlng[0], latlng[1]], {icon: icon});
+      var removePoint = (event) => {
+        console.log(event + ' ' + i);
+        iconLayer.removeLayer(marker);
+        delete latlngs[i];
+        updatePaceChart();
+      };
+      marker.on('click', removePoint);
+      marker.on('contextmenu', removePoint);
+      iconLayer.addLayer(marker);
+      icons.push(marker);
+    })();}
+    // zoom the map to the polyline
+    mymap.fitBounds(polyline.getBounds());
+    updateZoom = function(event) {
+      console.log(event.target.getZoom());
+      if (event.target.getZoom() > 16) {
+        iconLayer.addTo(mymap);
+      } else {
+        iconLayer.remove();
+      }
+    };
+    mymap.on('zoom', updateZoom);
+    updateZoom({target: mymap});
+
+    var trim = (keep) => {
+      var previdx = 0;
+      var numtrimmed = 0;
+      for (var i = 1; i < latlngs.length; i++) {
+        var latlng = latlngs[i];
+        if (latlng === undefined) {
+          continue;
+        }
+        var prev = latlngs[previdx];
+        var speed = calculateSpeed(times[previdx]/1000, prev[0], prev[1], times[i]/1000, latlng[0], latlng[1]);
+        //console.log(speed);
+        if (!keep(speed)) {
+          delete latlngs[i];
+          iconLayer.removeLayer(icons[i]);
+          numtrimmed++;
+          continue;
+        }
+        previdx = i;
+      }
+      console.log("Trimmed " + numtrimmed + " points");
+      if (numtrimmed > 0) {
+        updatePaceChart();
+      }
+    };
+    var trimclick = (id, keep) => {
+      var speed = $(id).attr("value").split(":");
+      speed = parseInt(speed[0]) * 60 + parseInt(speed[1]);
+      // = sec / mile.  we want km / h.  1/x = mile/sec. * km/mile * sec/h.
+      speed = 1.60934 * 3600 / speed;
+      //console.log(speed);
+      trim((testspeed) => keep(speed, testspeed));
+    };
+    $("#trimspeed").on('click', (e) => trimclick("#maxspeed", (maxspeed, speed) => speed < maxspeed));
+    $("#trimminspeed").on('click', (e) => trimclick("#minspeed", (minspeed, speed) => speed > minspeed));
+
+    $("#genxml").on('click', (e) => {
+      var xml = response.implementation.createDocument(
+          response.namespaceURI, //namespace to use
+          null,                     //name of the root element (or for empty document)
+          null                      //doctype (null for XML)
+      );
+      var newNode = xml.importNode(
+          response.documentElement, //node to import
+          true                         //clone its descendants
+      );
+      xml.appendChild(newNode);
+      $(xml).find("trk > trkseg > trkpt").each(function(idx) {
+        if (latlngs[idx] === undefined) { $(this).remove(); }
+      });
+      $("#xml").val((new XMLSerializer()).serializeToString(xml));
+    });
+  };
+  $.ajax({
+      type: "GET",
+      url: "2020-05-30_09-31-49.gpx",
+      dataType: "xml",
+      success: function (response) {
+        loadGpxXML(response);
+      }
+  });
+  $("#loadxml").on('click', (e) => {
+    var xml = $.parseXML($("#xml").val());
+    loadGpxXML(xml);
+  });
+</script>
+	<script>
+		var ctx = document.getElementById('chart1').getContext('2d');
+		ctx.canvas.width = 600;
+		ctx.canvas.height = 200;
+
+    var formatPace = value => {
+      return Math.floor(value) + ":" + (Math.floor(100 + ((value * 60) % 60)) + "").substring(1);
+    };
+		var color = Chart.helpers.color;
+		var cfg = {
+			data: {
+				datasets: [{
+					label: 'Pace',
+					backgroundColor: color(window.chartColors.red).alpha(0.5).rgbString(),
+					borderColor: window.chartColors.red,
+					data: [{t:0, y:0}],
+					type: 'line',
+					pointRadius: 0,
+					fill: false,
+					lineTension: 0,
+					borderWidth: 2
+				}]
+			},
+			options: {
+				animation: {
+					duration: 0
+				},
+				scales: {
+					xAxes: [{
+						type: 'time',
+						distribution: 'series',
+						offset: true,
+						ticks: {
+							major: {
+								enabled: true,
+								fontStyle: 'bold'
+							},
+							source: 'data',
+							autoSkip: true,
+							autoSkipPadding: 75,
+							maxRotation: 0,
+							sampleSize: 100
+						}
+					}],
+					yAxes: [{
+            //type: "logarithmic",
+						gridLines: {
+							drawBorder: false
+						},
+						scaleLabel: {
+							display: true,
+							labelString: 'Minutes per Mile'
+						},
+            ticks: {
+              //min: 2,
+              max: 35,
+              callback: formatPace
+            }
+					}]
+				},
+				tooltips: {
+					intersect: false,
+					mode: 'index',
+					callbacks: {
+						label: function(tooltipItem, myData) {
+							var label = myData.datasets[tooltipItem.datasetIndex].label || '';
+							if (label) {
+								label += ': ';
+							}
+							label += formatPace(tooltipItem.value);
+              onPaceTooltip(tooltipItem, myData);
+							return label;
+						}
+					}
+				}
+			}
+		};
+
+		var chart = new Chart(ctx, cfg);
+
+	</script>
+</body>
+</html>
