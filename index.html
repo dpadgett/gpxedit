@@ -56,7 +56,7 @@ Trim points so min pace/mile is:<input type="text" value="15:00" id="minspeed"/>
 
   var onPaceTooltip = () => {};
 
-  var calculateSpeed = (t1, lat1, lon1, t2, lat2, lon2) => {
+  var calculateDistance = (lat1, lon1, lat2, lon2) => {
     // From Caspar Kleijne's answer starts
     /** Converts numeric degrees to radians */
     if (typeof(Number.prototype.toRad) === "undefined") {
@@ -77,8 +77,11 @@ Trim points so min pace/mile is:<input type="text" value="15:00" id="minspeed"/>
     var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); 
     var distance = R * c;
     // From cletus' answer ends
+    return distance;
+  }
 
-    return (distance / (t2 - t1)) * 3600;
+  var calculateSpeed = (t1, lat1, lon1, t2, lat2, lon2) => {
+    return (calculateDistance(lat1, lon1, lat2, lon2) / (t2 - t1)) * 3600;
   };
 
   var loadGpxXML = (response) => {
@@ -117,8 +120,11 @@ Trim points so min pace/mile is:<input type="text" value="15:00" id="minspeed"/>
         while (times[i] - times[prev[0].idx] > 60000 && prev.length > 2) {
           prev.shift();
         }
-        var p = prev[0];
-        var speed = calculateSpeed(times[p.idx]/1000, p.v[0], p.v[1], times[i]/1000, latlng[0], latlng[1]);
+        var distance = 0;
+        for (var idx = 0; idx < prev.length - 1; idx++) {
+          distance += calculateDistance(prev[idx].v[0], prev[idx].v[1], prev[idx+1].v[0], prev[idx+1].v[1]);
+        }
+        var speed = distance / ((times[prev[prev.length - 1].idx] - times[prev[0].idx])/1000) * 3600;
         // = km / h.  we want sec/mile.  1/x = h/km. * sec/h * mile/km
         speed = (1.60934 * 3600 / speed) / 60;
         chartdata.push({t: times[i], y: speed});
